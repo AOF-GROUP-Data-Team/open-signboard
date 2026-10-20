@@ -2,22 +2,23 @@
 # Signboard Report — Zenput 600319 (Classic + Lubda) + 671663 (Garatis)
 # GitHub Actions. Today's submissions (KSA): signboard photo +
 # "Is the signboard working properly?" per branch, plus branches that
-# did not submit -> xlsx, emailed as attachment with an Arabic summary.
+# did not submit -> PDF (HTML cards -> Playwright screenshot -> fpdf2),
+# emailed as attachment with an Arabic summary.
 # Secrets: ZENPUT_API_TOKEN, GMAIL_APP_PASSWORD
 # Env: MODE = auto (send) | test (no email), REPORT_DATE = "" or YYYY-MM-DD
 # ============================================================
-import os, sys, smtplib, requests, re, io
+import os, sys, smtplib, asyncio, requests, re, io, base64, html
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email.utils import formataddr
 from email import encoders
-from datetime import datetime
 import pytz
 from PIL import Image as PILImage, ImageOps
-from openpyxl import Workbook
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from fpdf import FPDF
+from playwright.async_api import async_playwright
+PILImage.MAX_IMAGE_PIXELS = None
 
 API_TOKEN   = os.environ.get("ZENPUT_API_TOKEN", "")
 GMAIL_USER  = "aof.group.auto@gmail.com"
@@ -32,8 +33,9 @@ HEADERS     = {"X-API-TOKEN": API_TOKEN}
 TZ          = pytz.timezone("Asia/Riyadh")
 PAGE        = 100
 LINK_BASE   = "https://ops-execution.crunchtime.com/reports/#form_id/"
-PHOTO_W     = 260         # px width of embedded photo
-ROW_H       = 150         # minimum row height (points) for photo rows
+PHOTO_W     = 600         # px width photos are resized to before embedding
+PAGE_W      = 1240        # px width of each rendered page
+SCALE       = 2           # screenshot device scale factor (sharpness)
 
 # template -> brand
 TEMPLATES = {600319: "Shawarma Classic", 671663: "Garatis"}
@@ -101,6 +103,7 @@ def signed_url(s3_key):
     return ((r.json() or {}).get("data") or {}).get("location")
 
 def fetch_photo(s3_key):
+    """-> (data URI or None, error)"""
     url = signed_url(s3_key)
     if not url: return None, "no signed url"
     r = requests.get(url, timeout=60)
@@ -110,9 +113,10 @@ def fetch_photo(s3_key):
         try: img = ImageOps.exif_transpose(img)
         except Exception: pass
         img = img.convert("RGB")
-        img = img.resize((PHOTO_W, int(img.height * PHOTO_W / img.width)))
-        buf = io.BytesIO(); img.save(buf, "JPEG", quality=80); buf.seek(0)
-        return buf, img.height
+        if img.width > PHOTO_W:
+            img = img.resize((PHOTO_W, int(img.height * PHOTO_W / img.width)))
+        buf = io.BytesIO(); img.save(buf, "JPEG", quality=82)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode(), None
     except Exception as e:
         return None, str(e)
 
@@ -180,59 +184,117 @@ for tid, brand in TEMPLATES.items():
                      "time": dt.strftime("%H:%M"), "prepared": prepared, "working": working,
                      "keys": keys, "link": LINK_BASE + str(s.get("legacy_submission_id") or "")})
 
-# ---------------- xlsx ----------------
-HDR = PatternFill("solid", fgColor="1F3864")
-SEC = PatternFill("solid", fgColor="D9E1F2")
-RED = PatternFill("solid", fgColor="F8CBAD")
-GRN = PatternFill("solid", fgColor="C6EFCE")
-GRY = PatternFill("solid", fgColor="D9D9D9")
-THIN = Border(*(Side(style="thin", color="BFBFBF"),) * 4)
-CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-wb = Workbook(); ws = wb.active; ws.title = "Signboard"
-ws.append(["Branch", "Status", "Time Submitted", "Prepared By", "Signboard Working?", "Signboard Photo", "Link"])
-for c in ws[1]: c.fill, c.font, c.alignment = HDR, Font(bold=True, color="FFFFFF"), CENTER
-for col, w in zip("ABCDEFG", [22, 15, 14, 16, 16, 38, 9]): ws.column_dimensions[col].width = w
-
+# ---------------- photos ----------------
 photo_fail = 0
-for brand in TEMPLATES.values():
-    ws.append([brand]); i = ws.max_row
-    ws.merge_cells(start_row=i, start_column=1, end_row=i, end_column=7)
-    ws[f"A{i}"].fill, ws[f"A{i}"].font, ws[f"A{i}"].alignment = SEC, Font(bold=True, size=12), CENTER
-    for r in [x for x in rows if x["brand"] == brand]:
-        label = f"{r['code']} {r['name']}"
-        if not r["submitted"]:
-            ws.append([label, "Not submitted", "", "", "", "", ""]); i = ws.max_row
-            for c in ws[i]: c.fill = GRY
-            ws[f"B{i}"].fill, ws[f"B{i}"].font = RED, Font(bold=True, color="C00000")
-        else:
-            ws.append([label, "Submitted", r["time"], r["prepared"],
-                       "Yes" if r["working"] else ("No" if r["working"] is False else "-"), "", "Open"])
-            i = ws.max_row
-            ws[f"E{i}"].fill = GRN if r["working"] else RED
-            ws[f"G{i}"].hyperlink, ws[f"G{i}"].font = r["link"], Font(color="0563C1", underline="single")
-            if r["keys"]:
-                buf, info = fetch_photo(r["keys"][0])
-                if buf:
-                    ws.add_image(XLImage(buf), f"F{i}")
-                    ws.row_dimensions[i].height = max(ROW_H, info * 0.75 + 6)
-                else:
-                    photo_fail += 1; ws[f"F{i}"] = f"photo failed: {info}"
-                    print(f"  photo failed {label}: {info}")
-            else:
-                ws[f"F{i}"] = "No photo"; ws[f"F{i}"].fill = RED
-        for c in ws[ws.max_row]: c.border, c.alignment = THIN, CENTER
+for r in rows:
+    r["img"] = None
+    if r.get("submitted") and r.get("keys"):
+        r["img"], err = fetch_photo(r["keys"][0])
+        if err:
+            photo_fail += 1; print(f"  photo failed {r['code']}: {err}")
 
-ws.append([])
-for brand in TEMPLATES.values():
+# ---------------- HTML ----------------
+BRAND_AR = {"Shawarma Classic": "شاورما كلاسيك", "Garatis": "قراطيس"}
+CSS = f"""
+@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap');
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ width: {PAGE_W}px; font-family: 'Tajawal', Tahoma, Arial, sans-serif; background: #f3f5f9; color: #1f2937; direction: rtl; }}
+.wrap {{ padding: 28px 30px 34px; }}
+.head {{ background: #1F3864; color: #fff; border-radius: 14px; padding: 20px 26px; display: flex; justify-content: space-between; align-items: center; }}
+.head h1 {{ font-size: 30px; font-weight: 800; }}
+.head .sub {{ font-size: 17px; opacity: .85; margin-top: 4px; }}
+.head .date {{ font-size: 20px; font-weight: 700; direction: ltr; }}
+.stats {{ display: flex; gap: 14px; margin: 18px 0 22px; }}
+.stat {{ flex: 1; background: #fff; border-radius: 12px; padding: 14px 16px; text-align: center; border: 1px solid #e3e7ef; }}
+.stat .n {{ font-size: 30px; font-weight: 800; }}
+.stat .l {{ font-size: 15px; color: #6b7280; margin-top: 2px; }}
+.ok {{ color: #15803d; }} .bad {{ color: #c00000; }} .muted {{ color: #6b7280; }}
+.grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }}
+.card {{ background: #fff; border-radius: 12px; overflow: hidden; border: 1px solid #e3e7ef; display: flex; flex-direction: column; }}
+.card.miss {{ background: #eceef2; border: 2px dashed #c4c9d4; }}
+.card.notok {{ border: 2px solid #c00000; }}
+.ch {{ padding: 10px 12px 8px; display: flex; justify-content: space-between; align-items: center; gap: 6px; }}
+.bn {{ font-size: 16px; font-weight: 800; direction: ltr; text-align: left; }}
+.badge {{ font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 20px; white-space: nowrap; }}
+.b-ok {{ background: #dcfce7; color: #15803d; }} .b-bad {{ background: #fde2e2; color: #c00000; }}
+.b-miss {{ background: #d1d5db; color: #374151; }}
+.ph {{ height: 210px; background: #e5e7eb; display: flex; align-items: center; justify-content: center; }}
+.ph img {{ width: 100%; height: 100%; object-fit: cover; }}
+.ph .none {{ color: #9ca3af; font-size: 15px; }}
+.cf {{ padding: 8px 12px 10px; font-size: 13.5px; color: #4b5563; display: flex; justify-content: space-between; }}
+.cf span {{ direction: ltr; }}
+"""
+
+def card(r):
+    label = html.escape(f"{r['code']} {r['name']}")
+    if not r["submitted"]:
+        return (f"<div class='card miss'><div class='ch'><div class='bn'>{label}</div>"
+                f"<div class='badge b-miss'>لم يسلّم</div></div>"
+                f"<div class='ph'><div class='none'>لا يوجد تسليم اليوم</div></div>"
+                f"<div class='cf'>&nbsp;</div></div>")
+    ok = r["working"]
+    badge = ("<div class='badge b-ok'>اللوحة تعمل</div>" if ok else
+             "<div class='badge b-bad'>اللوحة لا تعمل</div>" if ok is False else
+             "<div class='badge b-miss'>غير محدد</div>")
+    ph = f"<img src='{r['img']}'>" if r["img"] else "<div class='none'>لا توجد صورة</div>"
+    return (f"<div class='card{' notok' if ok is False else ''}'><div class='ch'><div class='bn'>{label}</div>{badge}</div>"
+            f"<div class='ph'>{ph}</div>"
+            f"<div class='cf'><span>{html.escape(r['prepared'] or '-')}</span><span>{r['time']}</span></div></div>")
+
+def page_html(brand):
     br = [r for r in rows if r["brand"] == brand]
-    ws.append([f"{brand}: submitted {sum(1 for r in br if r['submitted'])} / {len(br)} | "
-               f"not working {sum(1 for r in br if r['submitted'] and r['working'] is False)}"])
-    ws[f"A{ws.max_row}"].font = Font(bold=True)
-ws.freeze_panes = "A2"
+    sub = sum(1 for r in br if r["submitted"])
+    ok = sum(1 for r in br if r["submitted"] and r["working"])
+    bad = sum(1 for r in br if r["submitted"] and r["working"] is False)
+    miss = len(br) - sub
+    # order: not working first, then not submitted, then working
+    order = sorted(br, key=lambda r: (0 if r["submitted"] and r["working"] is False else 1 if not r["submitted"] else 2))
+    return f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><style>{CSS}</style></head>
+<body><div class="wrap">
+<div class="head"><div><h1>تقرير لوحات الفروع - {BRAND_AR.get(brand, brand)}</h1>
+<div class="sub">صورة اللوحة أثناء التشغيل وحالة عملها لكل فرع</div></div><div class="date">{day}</div></div>
+<div class="stats">
+<div class="stat"><div class="n">{sub} / {len(br)}</div><div class="l">الفروع المسلّمة</div></div>
+<div class="stat"><div class="n ok">{ok}</div><div class="l">اللوحات تعمل</div></div>
+<div class="stat"><div class="n bad">{bad}</div><div class="l">اللوحات لا تعمل</div></div>
+<div class="stat"><div class="n muted">{miss}</div><div class="l">فروع لم تسلّم</div></div>
+</div>
+<div class="grid">{''.join(card(r) for r in order)}</div>
+</div></body></html>"""
 
-fname = f"signboard_report_{day}.xlsx"
-wb.save(fname)
+# ---------------- render -> PDF ----------------
+async def render_pngs():
+    pngs = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": PAGE_W, "height": 1000}, device_scale_factor=SCALE)
+        for brand in TEMPLATES.values():
+            await page.set_content(page_html(brand), wait_until="networkidle")
+            await page.wait_for_timeout(1500)
+            safe = re.sub(r"\W+", "_", brand)
+            path = f"_signboard_{safe}.png"
+            await page.screenshot(path=path, full_page=True)
+            pngs.append(path)
+        await browser.close()
+    return pngs
+
+def pngs_to_pdf(pngs, out):
+    pdf = FPDF(unit="pt")
+    pdf.set_auto_page_break(False)
+    for pth in pngs:
+        w, h = PILImage.open(pth).size
+        pw, ph = w / SCALE * 0.75, h / SCALE * 0.75     # px -> pt at 96 dpi
+        pdf.add_page(format=(pw, ph))
+        pdf.image(pth, x=0, y=0, w=pw, h=ph)
+    pdf.output(out)
+
+fname = f"signboard_report_{day}.pdf"
+pngs = asyncio.run(render_pngs())
+pngs_to_pdf(pngs, fname)
+for pth in pngs:
+    try: os.remove(pth)
+    except Exception: pass
+
 print(f"\nSaved {fname} | photo failures: {photo_fail}")
 for brand in TEMPLATES.values():
     br = [r for r in rows if r["brand"] == brand]
@@ -279,7 +341,7 @@ def build_html():
 {summary}
 </table>
 {details}
-<p style="margin-top:18px">صور اللوحات وروابط التسليم في الملف المرفق.</p>
+<p style="margin-top:18px">صور اللوحات لجميع الفروع في ملف PDF المرفق.</p>
 <p>مع خالص التحية،<br>إدارة ذكاء الأعمال</p>
 </body></html>"""
 
@@ -293,7 +355,7 @@ def send_email(path):
     msg["Subject"] = f"تقرير لوحات الفروع - {day}"
     msg.attach(MIMEText(build_html(), "html", "utf-8"))
     with open(path, "rb") as f:
-        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        part = MIMEBase("application", "pdf")
         part.set_payload(f.read())
     encoders.encode_base64(part)
     part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(path)}"')
