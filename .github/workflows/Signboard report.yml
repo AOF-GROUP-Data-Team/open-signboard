@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto = build and email | test = build xlsx only, no email"
+        description: "auto = build and email | test = build PDF only, no email"
         required: false
         default: "auto"
         type: choice
@@ -31,7 +31,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
 
       - name: Build and send signboard report
         env:
@@ -41,11 +43,11 @@ jobs:
           REPORT_DATE: ${{ github.event.inputs.report_date || '' }}
         run: python signboard_report.py
 
-      - name: Upload xlsx
+      - name: Upload PDF
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: signboard-report
-          path: signboard_report_*.xlsx
+          path: signboard_report_*.pdf
           if-no-files-found: ignore
           retention-days: 14
