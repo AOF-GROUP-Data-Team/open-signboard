@@ -24,8 +24,13 @@ API_TOKEN   = os.environ.get("ZENPUT_API_TOKEN", "")
 GMAIL_USER  = "aof.group.auto@gmail.com"
 GMAIL_PASS  = os.environ.get("GMAIL_APP_PASSWORD", "")
 SENDER_NAME = "Business Intelligence"
-TO_EMAILS   = ["o.salahaddin@aofgroup.com"]
-CC_EMAILS   = ["a.alsalem@aofgroup.com"]
+TO_EMAILS   = [  "m.alsaghir@aofgroup.com","n.joshe@aofgroup.com","a.banafe@aofgroup.com",
+    "i.mostafa@aofgroup.com","m.alghazali@aofgroup.com","n.alzahrani@aofgroup.com","s.poudel@aofgroup.com","m.emad@aofgroup.com",
+    "a.suliman@aofgroup.com","a.alarabi@aofgroup.com","o.aljawhari@aofgroup.com","s.mansuri@aofgroup.com","m.suhail@aofgroup.com",
+    "a.alghanimi@lubdasa.com","m.alfadhil@aofgroup.com"]
+CC_EMAILS   = [ "o.salahaddin@aofgroup.com","a.alsalem@aofgroup.com","m.hejazi@aofgroup.com",
+    "omar@aofgroup.com","m.alhuaydar@aofgroup.com",
+    "a.omara@aofgroup.com","s.alharbi@aofgroup.com",]
 MODE        = os.environ.get("MODE", "auto").strip().lower()
 REPORT_DATE = os.environ.get("REPORT_DATE", "").strip()   # "" = today (KSA)
 BASE        = "https://www.zenput.com"
