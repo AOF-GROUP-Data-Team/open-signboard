@@ -25,7 +25,7 @@ GMAIL_USER  = "aof.group.auto@gmail.com"
 GMAIL_PASS  = os.environ.get("GMAIL_APP_PASSWORD", "")
 SENDER_NAME = "Business Intelligence"
 TO_EMAILS   = [  "m.alsaghir@aofgroup.com","n.joshe@aofgroup.com","a.banafe@aofgroup.com",
-    "i.mostafa@aofgroup.com","m.alghazali@aofgroup.com","n.alzahrani@aofgroup.com","s.poudel@aofgroup.com","m.emad@aofgroup.com",
+    "i.mostafa@aofgroup.com","m.alghazali@aofgroup.com","s.poudel@aofgroup.com","m.emad@aofgroup.com",
     "a.suliman@aofgroup.com","a.alarabi@aofgroup.com","o.aljawhari@aofgroup.com","s.mansuri@aofgroup.com","m.suhail@aofgroup.com",
     "a.alghanimi@lubdasa.com"]
 CC_EMAILS   = [ "o.salahaddin@aofgroup.com","a.alsalem@aofgroup.com","m.hejazi@aofgroup.com",
@@ -60,7 +60,7 @@ BRANCHES = {
         "B31": (2235670, "ANRUH"),  "B32": (2239240, "FYJED"),  "B33": (2242934, "HIRJED"),
         "B34": (2243963, "URRUH"),  "B35": (2250799, "IRRUH"),  "B36": (2258220, "PSJED"),
         "B37": (2257790, "SHWMAK"), "B38": (2260889, "UHDMM"),  "B39": (2263062, "HSRUH"),
-        "B40": (2281339, "MZDMM"), "B41": (2283017, "AQKBR"),
+        "B40": (2281339, "MZDMM"), "B41": (2283017, "AQKBR"), "B42": (2283896, "KFJUB"),
         "LB01": (2169459, "Lubda Alaqeq"), "LB02": (2222802, "Lubda Alkhaleej"),
     },
     "Garatis": {
